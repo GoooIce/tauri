@@ -456,10 +456,14 @@ pub fn build() {
 pub fn try_build(attributes: Attributes) -> Result<()> {
   use anyhow::anyhow;
 
+  #[cfg(target_env = "ohos")]
+  napi_build_ohos::setup();
+
   println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
 
-  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-  let mobile = target_os == "ios" || target_os == "android";
+  let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+  let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+  let mobile = target_os == "ios" || target_os == "android" || target_env == "ohos";
   cfg_alias("desktop", !mobile);
   cfg_alias("mobile", mobile);
 

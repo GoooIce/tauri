@@ -9,6 +9,7 @@ use crate::{
   ConfigValue, Result,
 };
 use cargo_mobile2::{
+  android::env::Env as AndroidEnv,
   config::app::App,
   reserved_names::KOTLIN_ONLY_KEYWORDS,
   util::{
@@ -38,7 +39,8 @@ pub fn command(
     reinstall_deps,
     skip_targets_install,
     config,
-  )?;
+  )
+  .map_err(|e| anyhow::anyhow!("{:#}", e))?;
   Ok(())
 }
 
@@ -79,8 +81,6 @@ pub fn exec(
         if r.is_match(&bin_stem.to_string_lossy()) {
           if var_os("PNPM_PACKAGE_NAME").is_some() {
             return ("pnpm".into(), build_args);
-          } else if is_pnpm_dlx() {
-            return ("pnpm".into(), vec!["dlx", "@tauri-apps/cli"]);
           } else if let Some(npm_execpath) = var_os("npm_execpath") {
             let manager_stem = PathBuf::from(&npm_execpath)
               .file_stem()
@@ -117,40 +117,50 @@ pub fn exec(
   build_args.push(target.command_name());
   build_args.push(target.ide_build_script_name());
 
-  let mut binary = binary.to_string_lossy().to_string();
-  if binary.ends_with(".exe") || binary.ends_with(".cmd") || binary.ends_with(".bat") {
-    // remove Windows-only extension
-    binary.pop();
-    binary.pop();
-    binary.pop();
-    binary.pop();
-  }
-
-  map.insert("tauri-binary", binary);
+  // TODO: temp `\ -> /` conversion for ohos
+  map.insert(
+    "tauri-binary",
+    dunce::simplified(std::path::Path::new(&binary))
+      .to_string_lossy()
+      .replace('\\', "/"),
+  );
   map.insert("tauri-binary-args", &build_args);
   map.insert("tauri-binary-args-str", build_args.join(" "));
 
   let app = match target {
     // Generate Android Studio project
-    Target::Android => {
-      let _env = super::android::env(non_interactive)?;
-      let (config, metadata) =
-        super::android::get_config(&app, tauri_config_, &[], &Default::default());
-      map.insert("android", &config);
-      super::android::project::gen(
-        &config,
-        &metadata,
-        (handlebars, map),
-        wrapper,
-        skip_targets_install,
-      )?;
-      app
-    }
+    Target::Android => match AndroidEnv::new() {
+      Ok(_env) => {
+        let (config, metadata) =
+          super::android::get_config(&app, tauri_config_, None, &Default::default());
+        map.insert("android", &config);
+        super::android::project::gen(
+          &config,
+          &metadata,
+          (handlebars, map),
+          wrapper,
+          skip_targets_install,
+        )?;
+        app
+      }
+      Err(err) => {
+        if err.sdk_or_ndk_issue() {
+          Report::action_request(
+            " to initialize Android environment; Android support won't be usable until you fix the issue below and re-run `tauri android init`!",
+            err,
+          )
+          .print(wrapper);
+          app
+        } else {
+          return Err(err.into());
+        }
+      }
+    },
     #[cfg(target_os = "macos")]
     // Generate Xcode project
     Target::Ios => {
       let (config, metadata) =
-        super::ios::get_config(&app, tauri_config_, &[], &Default::default())?;
+        super::ios::get_config(&app, tauri_config_, None, &Default::default())?;
       map.insert("apple", &config);
       super::ios::project::gen(
         tauri_config_,
@@ -162,6 +172,12 @@ pub fn exec(
         reinstall_deps,
         skip_targets_install,
       )?;
+      app
+    }
+    Target::OpenHarmony => {
+      let (config, _metadata) =
+        super::open_harmony::get_config(&app, tauri_config_, None, &Default::default());
+      super::open_harmony::project::gen(&app, &config, (handlebars, map), skip_targets_install)?;
       app
     }
   };
@@ -321,7 +337,7 @@ fn escape_kotlin_keyword(
   out.write(&escaped_result).map_err(Into::into)
 }
 
-fn app_root(ctx: &Context) -> std::result::Result<&str, RenderError> {
+fn app_root(ctx: &Context) -> Result<&str, RenderError> {
   let app_root = ctx
     .data()
     .get("app")
@@ -378,18 +394,4 @@ fn unprefix_path(
         })?,
     )
     .map_err(Into::into)
-}
-
-fn is_pnpm_dlx() -> bool {
-  var_os("NODE_PATH")
-    .map(PathBuf::from)
-    .is_some_and(|node_path| {
-      let mut iter = node_path.components().peekable();
-      while let Some(c) = iter.next() {
-        if c.as_os_str() == "pnpm" && iter.peek().is_some_and(|c| c.as_os_str() == "dlx") {
-          return true;
-        }
-      }
-      false
-    })
 }
